@@ -1,0 +1,2 @@
+# rsdocbot
+Rust documentation bot
