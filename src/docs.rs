@@ -85,6 +85,10 @@ fn build_documentation(document: Document, url: &Url) -> Documentation {
             writer.write(declaration, url);
         }
 
+        if document.description.is_empty() {
+            writer.write_title(&document.title, url);
+        }
+
         for description in &document.description {
             writer.write_paragraphs(
                 description.heading.as_ref().unwrap_or(&document.title),
@@ -199,6 +203,7 @@ fn text_parts_to_plain(parts: &[TextPart]) -> String {
                 };
                 buffer.push_str(&text);
             }
+            TextPart::Image(_) | TextPart::Table => {}
             TextPart::BeginStyle(style) => {
                 depth += 1;
                 if let TextStyle::Monospaced = style {
@@ -258,14 +263,12 @@ impl<'a> AutoPaginateWriter<'a> {
         }
         match style {
             TextStyle::Link(href) => {
-                if let Some(href) = href {
-                    if let Ok(href) = Url::options().base_url(Some(base_url)).parse(href) {
-                        let href = href.as_str().replace('"', "\\\"");
-                        let open = format!("<a href=\"{}\">", href);
-                        let close = "</a>".to_string();
-                        self.buffer.push_str(&open);
-                        self.styles.push((open, close));
-                    }
+                if let Ok(href) = Url::options().base_url(Some(base_url)).parse(href) {
+                    let href = href.as_str().replace('"', "\\\"");
+                    let open = format!("<a href=\"{}\">", href);
+                    let close = "</a>".to_string();
+                    self.buffer.push_str(&open);
+                    self.styles.push((open, close));
                 }
             }
             TextStyle::Bold => {
@@ -321,6 +324,7 @@ impl<'a> AutoPaginateWriter<'a> {
         for part in title {
             match part {
                 TextPart::Text(text) => self.write_str(text),
+                TextPart::Image(_) | TextPart::Table => {}
                 TextPart::BeginStyle(style) => self.apply_style(style, base_url),
                 TextPart::EndStyle => self.remove_style(),
             }
@@ -333,6 +337,16 @@ impl<'a> AutoPaginateWriter<'a> {
         for part in text {
             match part {
                 TextPart::Text(text) => self.write_str(text),
+                TextPart::Image(src) => {
+                    self.apply_style(&TextStyle::Link(src), base_url);
+                    self.write_str("(image)");
+                    self.remove_style();
+                }
+                TextPart::Table => {
+                    self.apply_style(&TextStyle::Link(base_url.as_str()), base_url);
+                    self.write_str("(table)");
+                    self.remove_style();
+                }
                 TextPart::BeginStyle(style) => self.apply_style(style, base_url),
                 TextPart::EndStyle => self.remove_style(),
             }

@@ -13,7 +13,7 @@ use telbot_ureq::{
     polling::Polling,
     types::{
         markup::ParseMode,
-        message::{EditMessageText, Message},
+        message::{EditMessageReplyMarkup, EditMessageText, Message},
         query::CallbackQuery,
         update::{Update, UpdateKind},
     },
@@ -149,14 +149,14 @@ fn on_callback(api: &Api, callback_query: &CallbackQuery, ctx: &mut Context) -> 
             {
                 if let Some(doc) = ctx.cached_docs.get(&session.path) {
                     if let Some(page) = doc.pages.get(session.page) {
-                        let mut request =
-                            EditMessageText::new(message.chat.id, message.message_id, &page.text)
-                                .with_parse_mode(ParseMode::HTML)
-                                .disable_web_page_preview();
                         if let Some(keyboard) = page.build_keyboard(index) {
-                            request = request.with_reply_markup(keyboard);
+                            let request = EditMessageReplyMarkup::new(
+                                message.chat.id,
+                                message.message_id,
+                                keyboard,
+                            );
+                            api.send_json(&request)?;
                         }
-                        api.send_json(&request)?;
                     }
                 }
             }
