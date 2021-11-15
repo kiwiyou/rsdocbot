@@ -14,6 +14,7 @@ use telbot_ureq::{
     types::{
         markup::ParseMode,
         message::{EditMessageText, Message},
+        query::CallbackQuery,
         update::{Update, UpdateKind},
     },
     Api, Result,
@@ -42,37 +43,10 @@ fn main() {
 
 fn on_update(api: &Api, update: &Update, ctx: &mut Context) -> Result<()> {
     match &update.kind {
-        UpdateKind::Message { message } => on_message(api, message, ctx)?,
-        UpdateKind::CallbackQuery { callback_query } => {
-            if let Some(message) = &callback_query.message {
-                if let Some(session) = ctx.sessions.get(callback_query.from.id) {
-                    if let Some(index) = callback_query
-                        .data
-                        .as_ref()
-                        .and_then(|data| data.parse::<usize>().ok())
-                    {
-                        if let Some(doc) = ctx.cached_docs.get(&session.path) {
-                            if let Some(page) = doc.pages.get(index) {
-                                let mut request = EditMessageText::new(
-                                    message.chat.id,
-                                    message.message_id,
-                                    &page.text,
-                                )
-                                .with_parse_mode(ParseMode::HTML)
-                                .disable_web_page_preview();
-                                if let Some(keyboard) = &page.keyboard {
-                                    request = request.with_reply_markup(keyboard.clone());
-                                }
-                                api.send_json(&request)?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
+        UpdateKind::Message { message } => on_message(api, message, ctx),
+        UpdateKind::CallbackQuery { callback_query } => on_callback(api, callback_query, ctx),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn on_message(api: &Api, message: &Message, ctx: &mut Context) -> Result<()> {
@@ -105,18 +79,21 @@ fn on_message(api: &Api, message: &Message, ctx: &mut Context) -> Result<()> {
                         }
                         Ok(Some(doc)) => {
                             ctx.cached_docs.insert(path.clone(), doc.clone());
-                            let from_id = message.from.as_ref().unwrap().id;
-                            ctx.sessions.insert(from_id, Session { page: 0, path });
                             let page = &doc.pages[0];
                             let mut request = message
-                                .reply_text(&page.text)
-                                .with_parse_mode(ParseMode::HTML)
-                                .allow_sending_without_reply()
-                                .disable_web_page_preview();
-                            if let Some(keyboard) = &page.keyboard {
+                            .reply_text(&page.text)
+                            .with_parse_mode(ParseMode::HTML)
+                            .allow_sending_without_reply()
+                            .disable_web_page_preview();
+                            if let Some(keyboard) = &page.build_keyboard(0) {
                                 request = request.with_reply_markup(keyboard.clone());
                             }
-                            api.send_json(&request)?;
+                            let message = api.send_json(&request)?;
+                            ctx.sessions.insert(
+                                message.chat.id,
+                                message.message_id,
+                                Session { page: 0, path },
+                            );
                         }
                         Err(e) => log::error!("cannot fetch documentation: {}", e),
                     }
@@ -139,6 +116,50 @@ fn on_message(api: &Api, message: &Message, ctx: &mut Context) -> Result<()> {
                     .allow_sending_without_reply()
                     .with_parse_mode(ParseMode::MarkdownV2);
                 api.send_json(&request)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn on_callback(api: &Api, callback_query: &CallbackQuery, ctx: &mut Context) -> Result<()> {
+    if let Some(message) = &callback_query.message {
+        if let Some(session) = ctx.sessions.get(message.chat.id, message.message_id) {
+            if let Some(index) = callback_query
+                .data
+                .as_ref()
+                .and_then(|data| data.parse::<usize>().ok())
+            {
+                if let Some(doc) = ctx.cached_docs.get(&session.path) {
+                    if let Some(page) = doc.pages.get(index) {
+                        let mut request =
+                            EditMessageText::new(message.chat.id, message.message_id, &page.text)
+                                .with_parse_mode(ParseMode::HTML)
+                                .disable_web_page_preview();
+                        if let Some(keyboard) = page.build_keyboard(0) {
+                            request = request.with_reply_markup(keyboard.clone());
+                        }
+                        api.send_json(&request)?;
+                    }
+                }
+            } else if let Some(index) = callback_query
+                .data
+                .as_ref()
+                .and_then(|data| data.get(1..))
+                .and_then(|data| data.parse::<usize>().ok())
+            {
+                if let Some(doc) = ctx.cached_docs.get(&session.path) {
+                    if let Some(page) = doc.pages.get(session.page) {
+                        let mut request =
+                            EditMessageText::new(message.chat.id, message.message_id, &page.text)
+                                .with_parse_mode(ParseMode::HTML)
+                                .disable_web_page_preview();
+                        if let Some(keyboard) = page.build_keyboard(index) {
+                            request = request.with_reply_markup(keyboard.clone());
+                        }
+                        api.send_json(&request)?;
+                    }
+                }
             }
         }
     }

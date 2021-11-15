@@ -24,15 +24,15 @@ pub struct Session {
 
 #[derive(Default)]
 pub struct SessionStore {
-    finder: HashMap<i64, Session>,
+    finder: HashMap<(i64, i64), Session>,
 }
 
 impl SessionStore {
-    pub fn get(&self, user_id: i64) -> Option<&Session> {
-        self.finder.get(&user_id)
+    pub fn get(&self, chat_id: i64, message_id: i64) -> Option<&Session> {
+        self.finder.get(&(chat_id, message_id))
     }
 
-    pub fn insert(&mut self, user_id: i64, session: Session) {
-        self.finder.insert(user_id, session);
+    pub fn insert(&mut self, chat_id: i64, message_id: i64, session: Session) {
+        self.finder.insert((chat_id, message_id), session);
     }
 }

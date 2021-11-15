@@ -1,8 +1,7 @@
 use paradocs::{parse_document, Document, Html, Paragraph, TextPart, TextStyle};
 use regex::Regex;
 use telbot_ureq::types::markup::{
-    InlineKeyboardButton, InlineKeyboardButtonKind, InlineKeyboardMarkup, InlineKeyboardRow,
-    ParseMode,
+    InlineKeyboardButtonKind, InlineKeyboardMarkup, InlineKeyboardRow, ParseMode,
 };
 use url::Url;
 
@@ -11,7 +10,34 @@ use crate::path::DocPath;
 #[derive(Clone)]
 pub struct Page {
     pub text: String,
-    pub keyboard: Option<InlineKeyboardMarkup>,
+    pub page_keyboard: Option<InlineKeyboardRow>,
+    pub additionals: Vec<Vec<InlineKeyboardRow>>,
+}
+
+impl Page {
+    pub fn build_keyboard(&self, index: usize) -> Option<InlineKeyboardMarkup> {
+        if let Some(page_keyboard) = &self.page_keyboard {
+            let markup = InlineKeyboardMarkup::new_with_row(page_keyboard.clone());
+            let markup = if let Some(rows) = self.additionals.get(index) {
+                rows.iter()
+                    .cloned()
+                    .fold(markup, InlineKeyboardMarkup::with_row)
+            } else {
+                markup
+            };
+            Some(markup)
+        } else if let Some(one) = self.additionals.get(index).and_then(|rows| rows.first()) {
+            let markup = InlineKeyboardMarkup::new_with_row(one.clone());
+            Some(
+                self.additionals[index][1..]
+                    .iter()
+                    .cloned()
+                    .fold(markup, InlineKeyboardMarkup::with_row),
+            )
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -49,16 +75,13 @@ fn build_documentation(document: Document, url: &Url) -> Documentation {
 
     {
         let mut writer = AutoPaginateWriter::new(&mut pages);
-        let description = if let Some(first) = document.description.first() {
-            if first.heading.is_none() {
-                &first.contents[..]
-            } else {
-                &[]
-            }
-        } else {
-            &[]
-        };
-        writer.write_paragraphs(&document.title, description, url);
+        for description in &document.description {
+            writer.write_paragraphs(
+                description.heading.as_ref().unwrap_or(&document.title),
+                &description.contents,
+                url,
+            );
+        }
         writer.finalize();
     }
 
@@ -195,7 +218,8 @@ impl<'a> AutoPaginateWriter<'a> {
             let text = std::mem::replace(&mut self.buffer, String::new());
             self.pages.push(Page {
                 text,
-                keyboard: None,
+                page_keyboard: None,
+                additionals: vec![],
             });
         }
 
@@ -236,7 +260,8 @@ impl<'a> AutoPaginateWriter<'a> {
                 if self.written + prev_written + 1 > self.limit {
                     self.pages.push(Page {
                         text: prev_buf,
-                        keyboard: None,
+                        page_keyboard: None,
+                        additionals: vec![],
                     });
                     let new_buf = std::mem::replace(&mut self.buffer, String::new());
                     self.write_title(title, base_url);
@@ -266,7 +291,8 @@ impl<'a> AutoPaginateWriter<'a> {
         if !self.buffer.is_empty() {
             self.pages.push(Page {
                 text: self.buffer,
-                keyboard: None,
+                page_keyboard: None,
+                additionals: vec![],
             })
         }
 
@@ -275,34 +301,52 @@ impl<'a> AutoPaginateWriter<'a> {
             for (i, page) in self.pages[self.begin_page..].iter_mut().enumerate() {
                 use InlineKeyboardButtonKind::*;
                 let row = if i == 0 {
-                    InlineKeyboardRow::new_with(InlineKeyboardButton {
-                        text: "Next".into(),
-                        kind: Callback {
+                    InlineKeyboardRow::new_emplace(
+                        format!("🏠 1 / {}", len),
+                        Callback {
+                            callback_data: "dummy".into(),
+                        },
+                    )
+                    .emplace(
+                        "2 >",
+                        Callback {
                             callback_data: "1".into(),
                         },
-                    })
+                    )
                 } else if i == len - 1 {
-                    InlineKeyboardRow::new_with(InlineKeyboardButton {
-                        text: "Prev".into(),
-                        kind: Callback {
+                    InlineKeyboardRow::new_emplace(
+                        format!("< {}", len - 1),
+                        Callback {
                             callback_data: (i - 1).to_string(),
                         },
-                    })
-                } else {
-                    InlineKeyboardRow::new_with(InlineKeyboardButton {
-                        text: "Prev".into(),
-                        kind: Callback {
-                            callback_data: (i - 1).to_string(),
-                        },
-                    })
+                    )
                     .emplace(
-                        "Next",
+                        format!("🏠 {} / {}", i + 1, len),
+                        Callback {
+                            callback_data: "0".into(),
+                        },
+                    )
+                } else {
+                    InlineKeyboardRow::new_emplace(
+                        format!("< {}", i),
+                        Callback {
+                            callback_data: (i - 1).to_string(),
+                        },
+                    )
+                    .emplace(
+                        format!("🏠 {} / {}", i + 1, len),
+                        Callback {
+                            callback_data: "0".into(),
+                        },
+                    )
+                    .emplace(
+                        format!("{} >", i + 2),
                         Callback {
                             callback_data: (i + 1).to_string(),
                         },
                     )
                 };
-                page.keyboard = Some(InlineKeyboardMarkup::new_with_row(row));
+                page.page_keyboard = Some(row);
             }
         }
     }

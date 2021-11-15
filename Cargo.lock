@@ -893,7 +893,7 @@ dependencies = [
 [[package]]
 name = "telbot-types"
 version = "0.2.0"
-source = "git+https://github.com/kiwiyou/telbot#abb241f0ea13ebf12bde147a8dc1284a6361252f"
+source = "git+https://github.com/kiwiyou/telbot#b59d7cf4d347f81b21b17a1a0e1c1d49e5a6eefc"
 dependencies = [
  "serde",
 ]
@@ -901,7 +901,7 @@ dependencies = [
 [[package]]
 name = "telbot-ureq"
 version = "0.2.0"
-source = "git+https://github.com/kiwiyou/telbot#abb241f0ea13ebf12bde147a8dc1284a6361252f"
+source = "git+https://github.com/kiwiyou/telbot#b59d7cf4d347f81b21b17a1a0e1c1d49e5a6eefc"
 dependencies = [
  "multipart",
  "serde",
