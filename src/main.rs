@@ -69,7 +69,6 @@ fn on_message(api: &Api, message: &Message, ctx: &mut Context) -> Result<()> {
                         .with_parse_mode(ParseMode::HTML)
                         .allow_sending_without_reply()
                         .disable_web_page_preview();
-                    drop(cached);
                     api.send_json(&request)?;
                 } else {
                     match fetch_documentation(&path) {
@@ -81,10 +80,10 @@ fn on_message(api: &Api, message: &Message, ctx: &mut Context) -> Result<()> {
                             ctx.cached_docs.insert(path.clone(), doc.clone());
                             let page = &doc.pages[0];
                             let mut request = message
-                            .reply_text(&page.text)
-                            .with_parse_mode(ParseMode::HTML)
-                            .allow_sending_without_reply()
-                            .disable_web_page_preview();
+                                .reply_text(&page.text)
+                                .with_parse_mode(ParseMode::HTML)
+                                .allow_sending_without_reply()
+                                .disable_web_page_preview();
                             if let Some(keyboard) = &page.build_keyboard(0) {
                                 request = request.with_reply_markup(keyboard.clone());
                             }
@@ -137,7 +136,7 @@ fn on_callback(api: &Api, callback_query: &CallbackQuery, ctx: &mut Context) -> 
                                 .with_parse_mode(ParseMode::HTML)
                                 .disable_web_page_preview();
                         if let Some(keyboard) = page.build_keyboard(0) {
-                            request = request.with_reply_markup(keyboard.clone());
+                            request = request.with_reply_markup(keyboard);
                         }
                         api.send_json(&request)?;
                     }
@@ -155,7 +154,7 @@ fn on_callback(api: &Api, callback_query: &CallbackQuery, ctx: &mut Context) -> 
                                 .with_parse_mode(ParseMode::HTML)
                                 .disable_web_page_preview();
                         if let Some(keyboard) = page.build_keyboard(index) {
-                            request = request.with_reply_markup(keyboard.clone());
+                            request = request.with_reply_markup(keyboard);
                         }
                         api.send_json(&request)?;
                     }

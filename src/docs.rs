@@ -1,4 +1,4 @@
-use paradocs::{parse_document, Document, Html, Paragraph, TextPart, TextStyle};
+use paradocs::{parse_document, Document, Html, ItemRow, Paragraph, TextPart, TextStyle};
 use regex::Regex;
 use telbot_ureq::types::markup::{
     InlineKeyboardButtonKind, InlineKeyboardMarkup, InlineKeyboardRow, ParseMode,
@@ -73,8 +73,18 @@ pub fn fetch_documentation(path: &DocPath) -> Result<Option<Documentation>, ureq
 fn build_documentation(document: Document, url: &Url) -> Documentation {
     let mut pages = vec![];
 
+    let mut main_additionals = vec![];
+
     {
         let mut writer = AutoPaginateWriter::new(&mut pages);
+
+        if let Some(declaration) = &document.declaration {
+            writer.write_title(&document.title, url);
+            writer.line_break();
+            writer.line_break();
+            writer.write(declaration, url);
+        }
+
         for description in &document.description {
             writer.write_paragraphs(
                 description.heading.as_ref().unwrap_or(&document.title),
@@ -84,8 +94,126 @@ fn build_documentation(document: Document, url: &Url) -> Documentation {
         }
         writer.finalize();
     }
+    let main_end = pages.len();
+
+    {
+        for item_list in &document.items {
+            match &item_list.kind {
+                paradocs::ListingType::Table(table) => {
+                    let page_num = pages.len();
+                    let mut writer = AutoPaginateWriter::new(&mut pages);
+                    writer.write_item_rows(&item_list.heading, table, url);
+                    writer.finalize();
+                    for page in &mut pages[page_num..] {
+                        page.additionals.push(vec![InlineKeyboardRow::new_emplace(
+                            "» Main",
+                            InlineKeyboardButtonKind::Callback {
+                                callback_data: "0".into(),
+                            },
+                        )]);
+                    }
+                    add_additional_autopage(
+                        &mut main_additionals,
+                        InlineKeyboardRow::new_emplace(
+                            text_parts_to_plain(&item_list.heading),
+                            InlineKeyboardButtonKind::Callback {
+                                callback_data: page_num.to_string(),
+                            },
+                        ),
+                    );
+                }
+                paradocs::ListingType::Fields(_) => {}
+                paradocs::ListingType::Impls(_) => {}
+            }
+        }
+    }
+
+    add_additional_pager(&mut main_additionals);
+    for main_page in &mut pages[..main_end] {
+        main_page.additionals = main_additionals.clone();
+    }
 
     Documentation { pages }
+}
+
+fn add_additional_autopage(additionals: &mut Vec<Vec<InlineKeyboardRow>>, row: InlineKeyboardRow) {
+    if let Some(last_page) = additionals.last_mut() {
+        if last_page.len() >= 3 {
+            additionals.push(vec![row]);
+        } else {
+            last_page.push(row);
+        }
+    } else {
+        additionals.push(vec![row]);
+    }
+}
+
+fn add_additional_pager(additionals: &mut Vec<Vec<InlineKeyboardRow>>) {
+    let len = additionals.len();
+    if len > 1 {
+        for (i, additional) in additionals.iter_mut().enumerate() {
+            let row = if i == 0 {
+                InlineKeyboardRow::new_emplace(
+                    "↓",
+                    InlineKeyboardButtonKind::Callback {
+                        callback_data: format!("x{}", i + 1),
+                    },
+                )
+            } else if i == len - 1 {
+                InlineKeyboardRow::new_emplace(
+                    "↑",
+                    InlineKeyboardButtonKind::Callback {
+                        callback_data: format!("x{}", i - 1),
+                    },
+                )
+            } else {
+                InlineKeyboardRow::new_emplace(
+                    "↓",
+                    InlineKeyboardButtonKind::Callback {
+                        callback_data: format!("x{}", i + 1),
+                    },
+                )
+                .emplace(
+                    "↑",
+                    InlineKeyboardButtonKind::Callback {
+                        callback_data: format!("x{}", i - 1),
+                    },
+                )
+            };
+            additional.push(row);
+        }
+    }
+}
+
+fn text_parts_to_plain(parts: &[TextPart]) -> String {
+    let mut buffer = String::new();
+    let mut depth = 0;
+    let mut in_code = 0;
+    for part in parts {
+        match part {
+            TextPart::Text(text) => {
+                let text = if in_code > 0 {
+                    (*text).into()
+                } else {
+                    Regex::new("\\s+").unwrap().replace_all(text, " ")
+                };
+                buffer.push_str(&text);
+            }
+            TextPart::BeginStyle(style) => {
+                depth += 1;
+                if let TextStyle::Monospaced = style {
+                    in_code = depth;
+                }
+            }
+            TextPart::EndStyle => {
+                if in_code == depth {
+                    in_code = 0;
+                }
+                depth -= 1;
+            }
+        }
+    }
+    buffer
 }
 
 struct AutoPaginateWriter<'a> {
@@ -181,15 +309,13 @@ impl<'a> AutoPaginateWriter<'a> {
             for (open, _) in self.styles.iter() {
                 self.buffer.push_str(open);
             }
-        } else {
-            if let Some((_, close)) = self.styles.pop() {
-                self.buffer.push_str(&close);
-            }
+        } else if let Some((_, close)) = self.styles.pop() {
+            self.buffer.push_str(&close);
         }
     }
 
     fn write_title(&mut self, title: &[TextPart], base_url: &Url) {
-        let tmp = std::mem::replace(&mut self.styles, vec![]);
+        let tmp = std::mem::take(&mut self.styles);
         let in_code = self.in_code;
         self.in_code = false;
         for part in title {
@@ -214,18 +340,11 @@ impl<'a> AutoPaginateWriter<'a> {
     }
 
     fn write_paragraphs(&mut self, title: &[TextPart], paragraphs: &[Paragraph], base_url: &Url) {
-        if !self.buffer.is_empty() {
-            let text = std::mem::replace(&mut self.buffer, String::new());
-            self.pages.push(Page {
-                text,
-                page_keyboard: None,
-                additionals: vec![],
-            });
-        }
+        self.new_page();
 
         let mut written_p = 0;
         for paragraph in paragraphs {
-            let prev_buf = std::mem::replace(&mut self.buffer, String::new());
+            let prev_buf = std::mem::take(&mut self.buffer);
             let prev_written = self.written;
             self.written = 0;
 
@@ -263,7 +382,7 @@ impl<'a> AutoPaginateWriter<'a> {
                         page_keyboard: None,
                         additionals: vec![],
                     });
-                    let new_buf = std::mem::replace(&mut self.buffer, String::new());
+                    let new_buf = std::mem::take(&mut self.buffer);
                     self.write_title(title, base_url);
                     self.line_break();
                     self.line_break();
@@ -280,10 +399,65 @@ impl<'a> AutoPaginateWriter<'a> {
         }
     }
 
+    fn write_item_rows(&mut self, title: &[TextPart], rows: &[ItemRow], base_url: &Url) {
+        self.new_page();
+
+        let mut written_rows = 0;
+        for row in rows {
+            let prev_buf = std::mem::take(&mut self.buffer);
+            let prev_written = self.written;
+            self.written = 0;
+
+            if written_rows == 0 {
+                self.write_title(title, base_url);
+                self.line_break();
+                self.line_break();
+            }
+
+            self.write(&row.name, base_url);
+            self.line_break();
+            self.write(&row.summary, base_url);
+
+            if written_rows > 0 {
+                // 1 : line break
+                if self.written + prev_written + 1 > self.limit {
+                    self.pages.push(Page {
+                        text: prev_buf,
+                        page_keyboard: None,
+                        additionals: vec![],
+                    });
+                    let new_buf = std::mem::take(&mut self.buffer);
+                    self.write_title(title, base_url);
+                    self.line_break();
+                    self.line_break();
+                    self.buffer.push_str(&new_buf);
+                    written_rows = 0;
+                } else {
+                    let new_buf = std::mem::replace(&mut self.buffer, prev_buf);
+                    self.line_break();
+                    self.buffer.push_str(&new_buf);
+                    self.written += prev_written + 1;
+                }
+            }
+            written_rows += 1;
+        }
+    }
+
     fn line_break(&mut self) {
         if self.written < self.limit {
-            self.buffer.push_str("\n");
+            self.buffer.push('\n');
             self.written += 1;
+        }
+    }
+
+    fn new_page(&mut self) {
+        if !self.buffer.is_empty() {
+            let text = std::mem::take(&mut self.buffer);
+            self.pages.push(Page {
+                text,
+                page_keyboard: None,
+                additionals: vec![],
+            });
         }
     }
 
@@ -298,9 +472,10 @@ impl<'a> AutoPaginateWriter<'a> {
 
         let len = self.pages.len() - self.begin_page;
         if len > 1 {
-            for (i, page) in self.pages[self.begin_page..].iter_mut().enumerate() {
+            for (i, page) in self.pages.iter_mut().enumerate().skip(self.begin_page) {
+                let showing = i - self.begin_page;
                 use InlineKeyboardButtonKind::*;
-                let row = if i == 0 {
+                let row = if showing == 0 {
                     InlineKeyboardRow::new_emplace(
                         format!("🏠 1 / {}", len),
                         Callback {
@@ -310,10 +485,10 @@ impl<'a> AutoPaginateWriter<'a> {
                     .emplace(
                         "2 >",
                         Callback {
-                            callback_data: "1".into(),
+                            callback_data: (self.begin_page + 1).to_string(),
                         },
                     )
-                } else if i == len - 1 {
+                } else if showing == len - 1 {
                     InlineKeyboardRow::new_emplace(
                         format!("< {}", len - 1),
                         Callback {
@@ -323,24 +498,24 @@ impl<'a> AutoPaginateWriter<'a> {
                     .emplace(
                         format!("🏠 {} / {}", i + 1, len),
                         Callback {
-                            callback_data: "0".into(),
+                            callback_data: self.begin_page.to_string(),
                         },
                     )
                 } else {
                     InlineKeyboardRow::new_emplace(
-                        format!("< {}", i),
+                        format!("< {}", showing),
                         Callback {
                             callback_data: (i - 1).to_string(),
                         },
                     )
                     .emplace(
-                        format!("🏠 {} / {}", i + 1, len),
+                        format!("🏠 {} / {}", showing + 1, len),
                         Callback {
-                            callback_data: "0".into(),
+                            callback_data: self.begin_page.to_string(),
                         },
                     )
                     .emplace(
-                        format!("{} >", i + 2),
+                        format!("{} >", showing + 2),
                         Callback {
                             callback_data: (i + 1).to_string(),
                         },

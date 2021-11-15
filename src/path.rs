@@ -23,7 +23,7 @@ impl DocPath {
             format!("https://docs.rs/{}/*/", self.crate_name)
         };
         for module in &self.modules {
-            base_url.push_str(&module);
+            base_url.push_str(module);
             base_url.push('/');
         }
         let mut candidates = vec![];
