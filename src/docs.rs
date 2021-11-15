@@ -6,45 +6,42 @@ use telbot_ureq::types::markup::{
 };
 use url::Url;
 
+use crate::path::DocPath;
+
+#[derive(Clone)]
 pub struct Page {
     pub text: String,
     pub keyboard: Option<InlineKeyboardMarkup>,
 }
 
+#[derive(Clone)]
 pub struct Documentation {
     pub pages: Vec<Page>,
-    pub current: usize,
 }
 
-pub fn fetch_documentation(crate_name: &str) -> Result<Option<Documentation>, ureq::Error> {
-    let url = match crate_name {
-        "std" | "core" => {
-            format!("https://doc.rust-lang.org/{}", crate_name)
+pub fn fetch_documentation(path: &DocPath) -> Result<Option<Documentation>, ureq::Error> {
+    let candidates = path.docs_url();
+    for url in candidates {
+        match ureq::get(&url).call() {
+            Ok(response) => {
+                if response.status() == 200 {
+                    let url = Url::parse(response.get_url()).unwrap();
+                    let result = response
+                        .into_string()
+                        .ok()
+                        .as_deref()
+                        .map(Html::parse_document)
+                        .as_ref()
+                        .and_then(parse_document)
+                        .map(|doc| build_documentation(doc, &url));
+                    return Ok(result);
+                }
+            }
+            Err(e @ ureq::Error::Transport(_)) => return Err(e),
+            _ => {}
         }
-        _ => {
-            format!(
-                "https://docs.rs/{}/*/{}",
-                crate_name,
-                crate_name.replace('-', "_")
-            )
-        }
-    };
-
-    let response = ureq::get(&url).call()?;
-    if response.status() == 200 {
-        let url = Url::parse(response.get_url()).unwrap();
-        let result = response
-            .into_string()
-            .ok()
-            .as_deref()
-            .map(Html::parse_document)
-            .as_ref()
-            .and_then(parse_document)
-            .map(|doc| build_documentation(doc, &url));
-        Ok(result)
-    } else {
-        Ok(None)
     }
+    Ok(None)
 }
 
 fn build_documentation(document: Document, url: &Url) -> Documentation {
@@ -65,7 +62,7 @@ fn build_documentation(document: Document, url: &Url) -> Documentation {
         writer.finalize();
     }
 
-    Documentation { pages, current: 0 }
+    Documentation { pages }
 }
 
 struct AutoPaginateWriter<'a> {
@@ -75,10 +72,13 @@ struct AutoPaginateWriter<'a> {
     in_code: bool,
     limit: usize,
     written: usize,
+
+    begin_page: usize,
 }
 
 impl<'a> AutoPaginateWriter<'a> {
     fn new(pages: &'a mut Vec<Page>) -> Self {
+        let len = pages.len();
         Self {
             pages,
             buffer: String::new(),
@@ -86,10 +86,12 @@ impl<'a> AutoPaginateWriter<'a> {
             in_code: false,
             limit: 1000,
             written: 0,
+
+            begin_page: len,
         }
     }
 
-    fn write_text_ignore_limit(&mut self, text: &str) {
+    fn write_str(&mut self, text: &str) {
         let text = if self.in_code {
             text.into()
         } else {
@@ -163,53 +165,25 @@ impl<'a> AutoPaginateWriter<'a> {
         }
     }
 
-    fn write_text_with_title(&mut self, title: &[TextPart], mut text: &str, base_url: &Url) {
-        while self.written + text.len() > self.limit {
-            let mut split_point = self.limit - self.written;
-            while !text.is_char_boundary(split_point) {
-                split_point -= 1;
-            }
-            let (write_now, next_page) = text.split_at(split_point);
-            text = next_page;
-            self.write_text_ignore_limit(write_now);
-            for (_, close) in self.styles.iter().rev() {
-                self.buffer.push_str(close);
-            }
-            let buffer = std::mem::replace(&mut self.buffer, String::new());
-            self.pages.push(Page {
-                text: buffer,
-                keyboard: None,
-            });
-            self.written = 0;
-            self.write_title(title, base_url);
-            for (open, _) in self.styles.iter() {
-                self.buffer.push_str(open);
-            }
-        }
-        if !text.is_empty() {
-            self.write_text_ignore_limit(text);
-        }
-    }
-
     fn write_title(&mut self, title: &[TextPart], base_url: &Url) {
+        let tmp = std::mem::replace(&mut self.styles, vec![]);
+        let in_code = self.in_code;
+        self.in_code = false;
         for part in title {
             match part {
-                TextPart::Text(text) => self.write_text_ignore_limit(text),
+                TextPart::Text(text) => self.write_str(text),
                 TextPart::BeginStyle(style) => self.apply_style(style, base_url),
                 TextPart::EndStyle => self.remove_style(),
             }
         }
-        self.line_break();
-        self.line_break();
+        self.styles = tmp;
+        self.in_code = in_code;
     }
 
-    fn write(&mut self, title: &[TextPart], text: &[TextPart], base_url: &Url) {
-        if self.buffer.is_empty() {
-            self.write_title(title, base_url);
-        }
+    fn write(&mut self, text: &[TextPart], base_url: &Url) {
         for part in text {
             match part {
-                TextPart::Text(text) => self.write_text_with_title(title, text, base_url),
+                TextPart::Text(text) => self.write_str(text),
                 TextPart::BeginStyle(style) => self.apply_style(style, base_url),
                 TextPart::EndStyle => self.remove_style(),
             }
@@ -217,30 +191,67 @@ impl<'a> AutoPaginateWriter<'a> {
     }
 
     fn write_paragraphs(&mut self, title: &[TextPart], paragraphs: &[Paragraph], base_url: &Url) {
-        if self.buffer.is_empty() {
-            self.write_title(title, base_url);
+        if !self.buffer.is_empty() {
+            let text = std::mem::replace(&mut self.buffer, String::new());
+            self.pages.push(Page {
+                text,
+                keyboard: None,
+            });
         }
 
+        let mut written_p = 0;
         for paragraph in paragraphs {
+            let prev_buf = std::mem::replace(&mut self.buffer, String::new());
+            let prev_written = self.written;
+            self.written = 0;
+
+            if written_p == 0 {
+                self.write_title(title, base_url);
+                self.line_break();
+                self.line_break();
+            }
+
             match paragraph {
                 Paragraph::Text(text) => {
-                    self.write(title, text, base_url);
-                    self.line_break();
+                    self.write(text, base_url);
                 }
                 Paragraph::List(list) => {
-                    for text in list {
-                        self.write_text_with_title(title, "• ", base_url);
-                        self.write(title, text, base_url);
-                        self.line_break();
+                    for (i, text) in list.iter().enumerate() {
+                        if i > 0 {
+                            self.line_break();
+                        }
+                        self.write_str("• ");
+                        self.write(text, base_url);
                     }
                 }
                 Paragraph::Code(text) => {
                     self.apply_style(&TextStyle::Monospaced, base_url);
-                    self.write(title, text, base_url);
+                    self.write(text, base_url);
                     self.remove_style();
-                    self.line_break();
                 }
             }
+
+            if written_p > 0 {
+                // 1 : line break
+                if self.written + prev_written + 1 > self.limit {
+                    self.pages.push(Page {
+                        text: prev_buf,
+                        keyboard: None,
+                    });
+                    let new_buf = std::mem::replace(&mut self.buffer, String::new());
+                    self.write_title(title, base_url);
+                    self.line_break();
+                    self.line_break();
+                    self.buffer.push_str(&new_buf);
+                    written_p = 0;
+                } else {
+                    let new_buf = std::mem::replace(&mut self.buffer, prev_buf);
+                    self.line_break();
+                    self.buffer.push_str(&new_buf);
+                    self.written += prev_written + 1;
+                }
+            }
+            written_p += 1;
         }
     }
 
@@ -257,6 +268,42 @@ impl<'a> AutoPaginateWriter<'a> {
                 text: self.buffer,
                 keyboard: None,
             })
+        }
+
+        let len = self.pages.len() - self.begin_page;
+        if len > 1 {
+            for (i, page) in self.pages[self.begin_page..].iter_mut().enumerate() {
+                use InlineKeyboardButtonKind::*;
+                let row = if i == 0 {
+                    InlineKeyboardRow::new_with(InlineKeyboardButton {
+                        text: "Next".into(),
+                        kind: Callback {
+                            callback_data: "1".into(),
+                        },
+                    })
+                } else if i == len - 1 {
+                    InlineKeyboardRow::new_with(InlineKeyboardButton {
+                        text: "Prev".into(),
+                        kind: Callback {
+                            callback_data: (i - 1).to_string(),
+                        },
+                    })
+                } else {
+                    InlineKeyboardRow::new_with(InlineKeyboardButton {
+                        text: "Prev".into(),
+                        kind: Callback {
+                            callback_data: (i - 1).to_string(),
+                        },
+                    })
+                    .emplace(
+                        "Next",
+                        Callback {
+                            callback_data: (i + 1).to_string(),
+                        },
+                    )
+                };
+                page.keyboard = Some(InlineKeyboardMarkup::new_with_row(row));
+            }
         }
     }
 }
